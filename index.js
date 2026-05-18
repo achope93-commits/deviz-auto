@@ -1,50 +1,42 @@
-import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
+const https = require('https');
 
-serve(async (request) => {
-  if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      }
-    });
-  }
+const server = require('http').createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (request.method !== 'POST') {
-    return new Response('Method not allowed', { status: 405 });
-  }
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
 
-  try {
-    const body = await request.json();
-    const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', () => {
+    const options = {
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiKey,
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify(body)
-    });
-
-    const data = await response.json();
-
-    return new Response(JSON.stringify(data), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
       }
+    };
+    const apiReq = https.request(options, apiRes => {
+      let data = '';
+      apiRes.on('data', chunk => data += chunk);
+      apiRes.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(data);
+      });
     });
-
-  } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      }
+    apiReq.on('error', err => {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: err.message }));
     });
-  }
+    apiReq.write(body);
+    apiReq.end();
+  });
 });
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log('Server running on port ' + PORT));
