@@ -41,33 +41,12 @@ const server = require('http').createServer((req, res) => {
     return;
   }
 
-  // VIN decode endpoint
-  if (req.method === 'GET' && req.url.startsWith('/vin/')) {
-    const vin = req.url.replace('/vin/', '').trim();
+  // Proxy generic catre AutoPartsAPI
+  if (req.method === 'GET' && req.url.startsWith('/autoparts/')) {
+    const apiPath = req.url.replace('/autoparts', '');
     makeRequest(
       'auto-parts-catalog.apiprofile.com',
-      `/api/vin/decode/vin/${vin}`,
-      {
-        'Content-Type': 'application/json',
-        'x-apiprofile-key': process.env.AUTOPARTS_API_KEY
-      },
-      (err, data) => {
-        if (err) { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); return; }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(data);
-      }
-    );
-    return;
-  }
-
-  // Parts search by VIN endpoint
-  if (req.method === 'GET' && req.url.startsWith('/parts/')) {
-    const parts = req.url.replace('/parts/', '').split('/');
-    const vehicleId = parts[0];
-    const category = parts[1] || '';
-    makeRequest(
-      'auto-parts-catalog.apiprofile.com',
-      `/api/vehicle/get-parts/vehicle-id/${vehicleId}${category ? '/category/' + category : ''}`,
+      apiPath,
       {
         'Content-Type': 'application/json',
         'x-apiprofile-key': process.env.AUTOPARTS_API_KEY
