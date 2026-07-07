@@ -4,9 +4,7 @@ function makeRequest(hostname, path, method, headers, body, callback) {
   const bodyStr = body ? JSON.stringify(body) : null;
   const options = {
     hostname, path, method,
-    headers: bodyStr
-      ? { ...headers, 'Content-Length': Buffer.byteLength(bodyStr) }
-      : headers
+    headers: bodyStr ? { ...headers, 'Content-Length': Buffer.byteLength(bodyStr) } : headers
   };
   const req = https.request(options, res => {
     let data = '';
@@ -47,28 +45,40 @@ const server = require('http').createServer((req, res) => {
     return;
   }
 
-  // Proxy POST catre AutoPartsAPI (piese per vehicul)
+  // Proxy POST catre AutoPartsAPI (cu body raw - multipart sau json)
   if (req.method === 'POST' && req.url.startsWith('/autoparts/')) {
     const apiPath = req.url.replace('/autoparts', '');
-    let body = '';
-    req.on('data', chunk => body += chunk);
+    let body = [];
+    req.on('data', chunk => body.push(chunk));
     req.on('end', () => {
-      const parsed = body ? JSON.parse(body) : {};
-      makeRequest(
-        'auto-parts-catalog.apiprofile.com', apiPath, 'POST',
-        { 'Content-Type': 'application/json', 'x-apiprofile-key': process.env.AUTOPARTS_API_KEY },
-        parsed,
-        (err, data) => {
-          if (err) { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); return; }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(data);
+      const bodyBuffer = Buffer.concat(body);
+      const contentType = req.headers['content-type'] || 'application/json';
+      const options = {
+        hostname: 'auto-parts-catalog.apiprofile.com',
+        path: apiPath,
+        method: 'POST',
+        headers: {
+          'x-apiprofile-key': process.env.AUTOPARTS_API_KEY,
+          'content-type': contentType,
+          'content-length': bodyBuffer.length
         }
-      );
+      };
+      const apiReq = https.request(options, apiRes => {
+        let data = '';
+        apiRes.on('data', chunk => data += chunk);
+        apiRes.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(data);
+        });
+      });
+      apiReq.on('error', err => { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); });
+      apiReq.write(bodyBuffer);
+      apiReq.end();
     });
     return;
   }
 
-  // Anthropic AI endpoint (POST fara prefix)
+  // Anthropic AI endpoint
   if (req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
