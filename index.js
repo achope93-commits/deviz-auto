@@ -90,7 +90,7 @@ const server = require('http').createServer((req, res) => {
       const tryFallback = () => {
         if (sent) return;
         console.log('apiprofile POST failed, switching to Autodoc...');
-        const fallbackOptions = {
+        const opts = {
           hostname: 'autodoc-parts-catalog.p.rapidapi.com',
           path: apiPath, method: 'POST',
           headers: {
@@ -99,9 +99,9 @@ const server = require('http').createServer((req, res) => {
             'content-type': contentType,
             'content-length': bodyBuffer.length
           },
-          timeout: 8000
+          timeout: 10000
         };
-        const r = https.request(fallbackOptions, apiRes => {
+        const r = https.request(opts, apiRes => {
           let data = '';
           apiRes.on('data', chunk => data += chunk);
           apiRes.on('end', () => sendResponse(data, 'autodoc'));
@@ -112,7 +112,7 @@ const server = require('http').createServer((req, res) => {
         r.end();
       };
 
-      const primaryOptions = {
+      const opts = {
         hostname: 'auto-parts-catalog.apiprofile.com',
         path: apiPath, method: 'POST',
         headers: {
@@ -120,21 +120,21 @@ const server = require('http').createServer((req, res) => {
           'content-type': contentType,
           'content-length': bodyBuffer.length
         },
-        timeout: 4000
+        timeout: 6000
       };
-      const r = https.request(primaryOptions, apiRes => {
+      const r = https.request(opts, apiRes => {
         let data = '';
         apiRes.on('data', chunk => data += chunk);
         apiRes.on('end', () => {
-          if (!sent && data && data.length > 10 && !data.startsWith('<')) {
+          if (!sent && data && data.length > 10 && !data.startsWith('<') && !data.includes('"error"')) {
             sendResponse(data, 'apiprofile');
           } else {
             tryFallback();
           }
         });
       });
-      r.on('error', () => tryFallback());
-      r.on('timeout', () => { r.destroy(); tryFallback(); });
+      r.on('error', () => { if (!sent) tryFallback(); });
+      r.on('timeout', () => { r.destroy(); if (!sent) tryFallback(); });
       r.write(bodyBuffer);
       r.end();
     });
