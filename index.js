@@ -1,11 +1,11 @@
 const https = require('https');
 
-function makeRequest(hostname, path, method, headers, body, callback) {
+function makeRequest(hostname, path, method, headers, body, timeoutMs, callback) {
   const bodyStr = body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null;
   const options = {
     hostname, path, method,
     headers: bodyStr ? { ...headers, 'Content-Length': Buffer.byteLength(bodyStr) } : headers,
-    timeout: 5000
+    timeout: timeoutMs || 5000
   };
   const req = https.request(options, res => {
     let data = '';
@@ -16,33 +16,6 @@ function makeRequest(hostname, path, method, headers, body, callback) {
   req.on('timeout', () => { req.destroy(); callback(new Error('timeout')); });
   if (bodyStr) req.write(bodyStr);
   req.end();
-}
-
-// Proxy catre AutoPartsAPI cu fallback automat
-function autoPartsRequest(path, method, body, contentType, callback) {
-  const primaryHeaders = {
-    'Content-Type': contentType || 'application/json',
-    'x-apiprofile-key': process.env.AUTOPARTS_API_KEY
-  };
-
-  const fallbackHeaders = {
-    'Content-Type': contentType || 'application/json',
-    'x-rapidapi-host': 'autodoc-parts-catalog.p.rapidapi.com',
-    'x-rapidapi-key': process.env.RAPIDAPI_KEY
-  };
-
-  // Incearca apiprofile
-  makeRequest('auto-parts-catalog.apiprofile.com', path, method, primaryHeaders, body, (err, data) => {
-    if (!err && data && !data.includes('"error"') && data.length > 10) {
-      return callback(null, data, 'apiprofile');
-    }
-    // Fallback pe Autodoc/RapidAPI
-    console.log('apiprofile failed, switching to Autodoc RapidAPI...');
-    makeRequest('autodoc-parts-catalog.p.rapidapi.com', path, method, fallbackHeaders, body, (err2, data2) => {
-      if (err2) return callback(err2);
-      callback(null, data2, 'autodoc');
-    });
-  });
 }
 
 const server = require('http').createServer((req, res) => {
@@ -58,18 +31,46 @@ const server = require('http').createServer((req, res) => {
     return;
   }
 
-  // Proxy GET catre AutoPartsAPI cu fallback
+  // Proxy GET cu fallback
   if (req.method === 'GET' && req.url.startsWith('/autoparts/')) {
     const apiPath = req.url.replace('/autoparts', '');
-    autoPartsRequest(apiPath, 'GET', null, 'application/json', (err, data, source) => {
-      if (err) { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); return; }
-      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Data-Source': source || 'unknown' });
+    let sent = false;
+
+    const sendResponse = (data, source) => {
+      if (sent) return;
+      sent = true;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Data-Source': source });
       res.end(data);
+    };
+
+    const tryFallback = () => {
+      makeRequest('autodoc-parts-catalog.p.rapidapi.com', apiPath, 'GET', {
+        'Content-Type': 'application/json',
+        'x-rapidapi-host': 'autodoc-parts-catalog.p.rapidapi.com',
+        'x-rapidapi-key': process.env.RAPIDAPI_KEY
+      }, null, 8000, (err, data) => {
+        if (sent) return;
+        if (err) { sent = true; res.writeHead(500); res.end(JSON.stringify({ error: err.message })); return; }
+        sendResponse(data, 'autodoc');
+      });
+    };
+
+    makeRequest('auto-parts-catalog.apiprofile.com', apiPath, 'GET', {
+      'Content-Type': 'application/json',
+      'x-apiprofile-key': process.env.AUTOPARTS_API_KEY
+    }, null, 4000, (err, data) => {
+      if (sent) return;
+      if (!err && data && data.length > 10 && !data.startsWith('<')) {
+        sendResponse(data, 'apiprofile');
+      } else {
+        console.log('apiprofile GET failed, switching to Autodoc...');
+        tryFallback();
+      }
     });
     return;
   }
 
-  // Proxy POST catre AutoPartsAPI cu fallback
+  // Proxy POST cu fallback
   if (req.method === 'POST' && req.url.startsWith('/autoparts/')) {
     const apiPath = req.url.replace('/autoparts', '');
     let body = [];
@@ -77,69 +78,70 @@ const server = require('http').createServer((req, res) => {
     req.on('end', () => {
       const bodyBuffer = Buffer.concat(body);
       const contentType = req.headers['content-type'] || 'application/json';
+      let sent = false;
 
-      const primaryHeaders = {
-        'x-apiprofile-key': process.env.AUTOPARTS_API_KEY,
-        'content-type': contentType,
-        'content-length': bodyBuffer.length
-      };
-
-      const fallbackHeaders = {
-        'x-rapidapi-host': 'autodoc-parts-catalog.p.rapidapi.com',
-        'x-rapidapi-key': process.env.RAPIDAPI_KEY,
-        'content-type': contentType,
-        'content-length': bodyBuffer.length
-      };
-
-      // Incearca apiprofile
-      const primaryOptions = {
-        hostname: 'auto-parts-catalog.apiprofile.com',
-        path: apiPath, method: 'POST',
-        headers: primaryHeaders, timeout: 5000
+      const sendResponse = (data, source) => {
+        if (sent) return;
+        sent = true;
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'X-Data-Source': source });
+        res.end(data);
       };
 
       const tryFallback = () => {
+        if (sent) return;
         console.log('apiprofile POST failed, switching to Autodoc...');
         const fallbackOptions = {
           hostname: 'autodoc-parts-catalog.p.rapidapi.com',
           path: apiPath, method: 'POST',
-          headers: fallbackHeaders, timeout: 5000
+          headers: {
+            'x-rapidapi-host': 'autodoc-parts-catalog.p.rapidapi.com',
+            'x-rapidapi-key': process.env.RAPIDAPI_KEY,
+            'content-type': contentType,
+            'content-length': bodyBuffer.length
+          },
+          timeout: 8000
         };
-        const apiReq2 = https.request(fallbackOptions, apiRes2 => {
+        const r = https.request(fallbackOptions, apiRes => {
           let data = '';
-          apiRes2.on('data', chunk => data += chunk);
-          apiRes2.on('end', () => {
-            res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'X-Data-Source': 'autodoc' });
-            res.end(data);
-          });
+          apiRes.on('data', chunk => data += chunk);
+          apiRes.on('end', () => sendResponse(data, 'autodoc'));
         });
-        apiReq2.on('error', err => { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); });
-        apiReq2.on('timeout', () => { apiReq2.destroy(); res.writeHead(504); res.end(JSON.stringify({ error: 'Both sources timeout' })); });
-        apiReq2.write(bodyBuffer);
-        apiReq2.end();
+        r.on('error', err => { if (!sent) { sent = true; res.writeHead(500); res.end(JSON.stringify({ error: err.message })); } });
+        r.on('timeout', () => { r.destroy(); if (!sent) { sent = true; res.writeHead(504); res.end(JSON.stringify({ error: 'Both timeout' })); } });
+        r.write(bodyBuffer);
+        r.end();
       };
 
-      const apiReq = https.request(primaryOptions, apiRes => {
+      const primaryOptions = {
+        hostname: 'auto-parts-catalog.apiprofile.com',
+        path: apiPath, method: 'POST',
+        headers: {
+          'x-apiprofile-key': process.env.AUTOPARTS_API_KEY,
+          'content-type': contentType,
+          'content-length': bodyBuffer.length
+        },
+        timeout: 4000
+      };
+      const r = https.request(primaryOptions, apiRes => {
         let data = '';
         apiRes.on('data', chunk => data += chunk);
         apiRes.on('end', () => {
-          if (data && data.length > 10 && !data.includes('"error"')) {
-            res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'X-Data-Source': 'apiprofile' });
-            res.end(data);
+          if (!sent && data && data.length > 10 && !data.startsWith('<')) {
+            sendResponse(data, 'apiprofile');
           } else {
             tryFallback();
           }
         });
       });
-      apiReq.on('error', tryFallback);
-      apiReq.on('timeout', () => { apiReq.destroy(); tryFallback(); });
-      apiReq.write(bodyBuffer);
-      apiReq.end();
+      r.on('error', () => tryFallback());
+      r.on('timeout', () => { r.destroy(); tryFallback(); });
+      r.write(bodyBuffer);
+      r.end();
     });
     return;
   }
 
-  // Anthropic AI endpoint
+  // Anthropic AI
   if (req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -149,8 +151,7 @@ const server = require('http').createServer((req, res) => {
         const bodyStr = JSON.stringify(parsed);
         const options = {
           hostname: 'api.anthropic.com',
-          path: '/v1/messages',
-          method: 'POST',
+          path: '/v1/messages', method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -161,10 +162,7 @@ const server = require('http').createServer((req, res) => {
         const apiReq = https.request(options, apiRes => {
           let data = '';
           apiRes.on('data', chunk => data += chunk);
-          apiRes.on('end', () => {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(data);
-          });
+          apiRes.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(data); });
         });
         apiReq.on('error', err => { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); });
         apiReq.write(bodyStr);
